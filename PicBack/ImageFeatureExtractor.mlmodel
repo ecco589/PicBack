@@ -1,0 +1,13 @@
+import CoreML
+
+let config = MLModelConfiguration()
+let model = try MobileNetV2(configuration: config)
+
+// 配置模型输出为特征向量
+let featureExtractor = try MLModel(contentsOf: model.model.modelURL)
+    .featureProvider
+    .featureValue(for: "features")
+    .multiArrayValue
+
+// 保存模型
+try featureExtractor.write(to: URL(fileURLWithPath: "ImageFeatureExtractor.mlmodel")) 
