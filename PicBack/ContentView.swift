@@ -315,15 +315,18 @@ struct ResultsView: View {
                             MatchGroupView(group: group)
                         }
                         
-                        if !matchGroups.isEmpty {
+                        if matchGroups.contains(where: { !$0.matches.isEmpty }) {
                             Button(action: saveAllMatches) {
-                                Text("保存所有原图")
-                                    .font(.headline)
-                                    .foregroundColor(.white)
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                                    .background(Color.blue)
-                                    .cornerRadius(10)
+                                HStack {
+                                    Image(systemName: "square.and.arrow.down.fill")
+                                    Text("保存所有原图")
+                                }
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(Color.blue)
+                                .cornerRadius(10)
                             }
                             .padding(.horizontal)
                         }
@@ -388,6 +391,7 @@ struct MatchGroup: Identifiable {
 
 struct MatchGroupView: View {
     let group: MatchGroup
+    @State private var showingSaveSuccess = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -400,29 +404,84 @@ struct MatchGroupView: View {
             }
             .padding(.horizontal)
             
-            Text("匹配结果:")
-                .font(.headline)
-                .padding(.horizontal)
-            
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 12) {
-                    ForEach(group.matches) { result in
-                        VStack {
-                            AssetThumbnailView(asset: result.matchedAsset)
-                                .frame(width: 120, height: 120)
-                                .cornerRadius(8)
-                            Text("\(Int(result.similarity * 100))%")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+            if group.matches.isEmpty {
+                ContentUnavailableView(
+                    "未找到相似图片",
+                    systemImage: "photo.on.rectangle.slash",
+                    description: Text("没有找到相似度达到95%的图片")
+                )
+                .frame(height: 150)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("匹配结果:")
+                            .font(.headline)
+                        Spacer()
+                        Button(action: { saveGroupMatches(group) }) {
+                            HStack {
+                                Image(systemName: "square.and.arrow.down")
+                                Text("保存此组原图")
+                            }
+                            .font(.subheadline)
+                            .foregroundColor(.blue)
                         }
                     }
+                    .padding(.horizontal)
+                    
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: 12) {
+                            ForEach(group.matches) { result in
+                                VStack {
+                                    AssetThumbnailView(asset: result.matchedAsset)
+                                        .frame(width: 120, height: 120)
+                                        .cornerRadius(8)
+                                    Text("\(Int(result.similarity * 100))%")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        .padding(.horizontal)
+                    }
                 }
-                .padding(.horizontal)
             }
         }
         .background(Color.gray.opacity(0.1))
         .cornerRadius(12)
         .padding(.horizontal)
+        .alert("保存成功", isPresented: $showingSaveSuccess) {
+            Button("确定", role: .cancel) { }
+        }
+    }
+    
+    private func saveGroupMatches(_ group: MatchGroup) {
+        for asset in group.matches.map({ $0.matchedAsset }) {
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .highQualityFormat
+            options.isNetworkAccessAllowed = true
+            options.isSynchronous = true
+            options.version = .original
+            
+            PHImageManager.default().requestImageDataAndOrientation(
+                for: asset,
+                options: options
+            ) { imageData, dataUTI, orientation, info in
+                guard let data = imageData else { return }
+                
+                PHPhotoLibrary.shared().performChanges {
+                    let request = PHAssetCreationRequest.forAsset()
+                    request.addResource(with: .photo, data: data, options: nil)
+                } completionHandler: { success, error in
+                    DispatchQueue.main.async {
+                        if success {
+                            showingSaveSuccess = true
+                        } else if let error = error {
+                            print("保存失败: \(error.localizedDescription)")
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
