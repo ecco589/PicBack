@@ -17,6 +17,8 @@ struct ContentView: View {
     @State private var isAnalyzing = false
     @State private var showingResults = false
     @State private var cachedFeatures: [String: ImageFeatures] = [:]
+    @State private var isShowingProgress = false
+    @State private var progress = 0
     
     var body: some View {
         NavigationView {
@@ -39,8 +41,9 @@ struct ContentView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     if !selectedPhotos.isEmpty {
                         Button("智能匹配") {
+                            isShowingProgress = true
+                            progress = 0
                             analyzeImages()
-                            showingResults = true
                         }
                     }
                 }
@@ -63,58 +66,78 @@ struct ContentView: View {
             } message: {
                 Text("请在设置中允许访问相册以使用照片匹配功能")
             }
+            .overlay {
+                if isShowingProgress {
+                    Color.black.opacity(0.3)
+                        .ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        ProgressView("正在分析第 \(progress) 张，共 \(selectedPhotos.count) 张")
+                            .tint(.white)
+                            .foregroundColor(.white)
+                    }
+                    .frame(width: 200, height: 100)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(10)
+                }
+            }
         }
     }
     
     private func analyzeImages() {
-        isAnalyzing = true
-        matchGroups = []
+        let totalCount = selectedPhotos.count
+        progress = 0
+        matchGroups = []  // 清空之前的结果
         
-        let group = DispatchGroup()
-        var tempGroups: [MatchGroup] = []
-        
-        if cachedFeatures.isEmpty {
-            buildFeatureCache()
-        }
-        
-        for sourceId in selectedPhotos {
-            group.enter()
-            
-            guard let sourceAsset = PHAsset.fetchAssets(withLocalIdentifiers: [sourceId], options: nil).firstObject,
-                  let sourceFeatures = cachedFeatures[sourceId] else {
-                group.leave()
-                continue
+        // 在后台线程执行分析
+        DispatchQueue.global(qos: .userInitiated).async {
+            // 确保先构建特征缓存
+            if cachedFeatures.isEmpty {
+                buildFeatureCache()
             }
             
-            var matches: [MatchResult] = []
-            for (targetId, targetFeatures) in cachedFeatures {
-                if targetId != sourceId {
-                    let similarity = compareFeatures(source: sourceFeatures, target: targetFeatures)
-                    if similarity >= 0.98 {
-                        if let targetAsset = PHAsset.fetchAssets(withLocalIdentifiers: [targetId], options: nil).firstObject {
-                            let result = MatchResult(
-                                sourceAsset: sourceAsset,
-                                matchedAsset: targetAsset,
-                                similarity: similarity,
-                                matchReason: getMatchReason(similarity: similarity)
-                            )
-                            matches.append(result)
+            var tempGroups: [MatchGroup] = []
+            
+            for (index, sourceId) in selectedPhotos.enumerated() {
+                // 更新进度
+                DispatchQueue.main.async {
+                    progress = index + 1
+                }
+                
+                guard let sourceAsset = PHAsset.fetchAssets(withLocalIdentifiers: [sourceId], options: nil).firstObject,
+                      let sourceFeatures = cachedFeatures[sourceId] else { continue }
+                
+                var matches: [MatchResult] = []
+                for (targetId, targetFeatures) in cachedFeatures {
+                    if targetId != sourceId {
+                        let similarity = compareFeatures(source: sourceFeatures, target: targetFeatures)
+                        if similarity >= 0.98 {
+                            if let targetAsset = PHAsset.fetchAssets(withLocalIdentifiers: [targetId], options: nil).firstObject {
+                                let result = MatchResult(
+                                    sourceAsset: sourceAsset,
+                                    matchedAsset: targetAsset,
+                                    similarity: similarity,
+                                    matchReason: getMatchReason(similarity: similarity)
+                                )
+                                matches.append(result)
+                            }
                         }
                     }
                 }
+                
+                matches.sort { $0.similarity > $1.similarity }
+                let topMatches = Array(matches.prefix(3))
+                let matchGroup = MatchGroup(sourceAsset: sourceAsset, matches: topMatches)
+                tempGroups.append(matchGroup)
+                
+                // 完成后更新UI
+                DispatchQueue.main.async {
+                    if index == totalCount - 1 {
+                        matchGroups = tempGroups
+                        isShowingProgress = false
+                        showingResults = true
+                    }
+                }
             }
-            
-            matches.sort { $0.similarity > $1.similarity }
-            let topMatches = Array(matches.prefix(3))
-            let matchGroup = MatchGroup(sourceAsset: sourceAsset, matches: topMatches)
-            tempGroups.append(matchGroup)
-            group.leave()
-        }
-        
-        group.notify(queue: .main) {
-            matchGroups = tempGroups
-            isAnalyzing = false
-            showingResults = true
         }
     }
     
