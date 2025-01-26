@@ -133,7 +133,7 @@ struct ContentView: View {
                             let targetFeatures = extractImageFeatures(from: image)
                             let similarity = compareFeatures(source: sourceFeatures, target: targetFeatures)
                             
-                            if similarity > 0.95 {
+                            if similarity >= 0.98 {
                                 let result = MatchResult(
                                     sourceAsset: sourceAsset,
                                     matchedAsset: asset,
@@ -148,7 +148,11 @@ struct ContentView: View {
             }
             
             innerGroup.notify(queue: .main) {
-                completion(tempResults.sorted { $0.similarity > $1.similarity })
+                // 按相似度降序排序，并只取前3张
+                let sortedResults = tempResults
+                    .sorted { $0.similarity > $1.similarity }
+                    .prefix(3)
+                completion(Array(sortedResults))
             }
         }
     }
@@ -170,13 +174,7 @@ struct ContentView: View {
     }
     
     private func getMatchReason(similarity: Double) -> String {
-        if similarity > 0.98 {
-            return "完全匹配"
-        } else if similarity > 0.95 {
-            return "极其相似"
-        } else {
-            return "相似图片"
-        }
+        return "完全匹配"  // 因为现在只显示98%以上的，所以都显示为完全匹配
     }
     
     private func checkPhotoLibraryPermission() {
