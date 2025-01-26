@@ -278,6 +278,9 @@ struct ResultsView: View {
     let matchGroups: [MatchGroup]
     let isAnalyzing: Bool
     @State private var showingSaveSuccess = false
+    @State private var isSaving = false
+    @State private var saveError: String?
+    @State private var selectedMatches: Set<String> = []
     
     var body: some View {
         Group {
@@ -293,23 +296,10 @@ struct ResultsView: View {
                 ScrollView {
                     LazyVStack(spacing: 20) {
                         ForEach(matchGroups) { group in
-                            MatchGroupView(group: group)
-                        }
-                        
-                        if matchGroups.contains(where: { !$0.matches.isEmpty }) {
-                            Button(action: saveAllMatches) {
-                                HStack {
-                                    Image(systemName: "square.and.arrow.down.fill")
-                                    Text("保存所有原图")
-                                }
-                                .font(.headline)
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(Color.blue)
-                                .cornerRadius(10)
-                            }
-                            .padding(.horizontal)
+                            MatchGroupView(
+                                group: group,
+                                selectedMatches: $selectedMatches
+                            )
                         }
                     }
                     .padding(.vertical)
@@ -317,38 +307,110 @@ struct ResultsView: View {
             }
         }
         .navigationTitle("匹配结果")
+        .toolbar {
+            if !matchGroups.flatMap({ $0.matches }).isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: saveAllMatches) {
+                        HStack {
+                            if isSaving {
+                                ProgressView()
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "square.and.arrow.down.fill")
+                                Text("保存所有原图")
+                            }
+                        }
+                    }
+                    .disabled(isSaving)
+                }
+            }
+        }
         .alert("保存成功", isPresented: $showingSaveSuccess) {
             Button("确定", role: .cancel) { }
+        }
+        .alert("保存失败", isPresented: .init(
+            get: { saveError != nil },
+            set: { if !$0 { saveError = nil } }
+        )) {
+            Button("确定", role: .cancel) { }
+        } message: {
+            if let error = saveError {
+                Text(error)
+            }
         }
     }
     
     private func saveAllMatches() {
-        let assets = matchGroups.flatMap { $0.matches.map { $0.matchedAsset } }
+        isSaving = true
+        let selectedAssets = matchGroups.flatMap { group in
+            group.matches.filter { selectedMatches.contains($0.matchedAsset.localIdentifier) }
+        }.map { $0.matchedAsset }
         
-        // 为每个资源创建一个图片请求队列
-        for asset in assets {
-            let options = PHImageRequestOptions()
-            options.deliveryMode = .highQualityFormat
-            options.isNetworkAccessAllowed = true
-            options.isSynchronous = true
-            options.version = .original  // 请求原始版本
+        guard !selectedAssets.isEmpty else {
+            saveError = "请先选择要保存的照片"
+            isSaving = false
+            return
+        }
+        
+        // 先请求写入权限
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized else {
+                DispatchQueue.main.async {
+                    isSaving = false
+                    saveError = "没有保存照片的权限"
+                }
+                return
+            }
             
-            PHImageManager.default().requestImageDataAndOrientation(
-                for: asset,
-                options: options
-            ) { imageData, dataUTI, orientation, info in
-                guard let data = imageData else { return }
-                
-                PHPhotoLibrary.shared().performChanges {
-                    let request = PHAssetCreationRequest.forAsset()
-                    request.addResource(with: .photo, data: data, options: nil)
-                } completionHandler: { success, error in
-                    DispatchQueue.main.async {
-                        if success {
-                            showingSaveSuccess = true
-                        } else if let error = error {
-                            print("保存失败: \(error.localizedDescription)")
+            // 使用信号量确保同步操作
+            let semaphore = DispatchSemaphore(value: 0)
+            var savedCount = 0
+            var failedCount = 0
+            
+            // 在后台队列中执行保存操作
+            DispatchQueue.global(qos: .userInitiated).async {
+                for asset in selectedAssets {
+                    let options = PHImageRequestOptions()
+                    options.deliveryMode = .highQualityFormat
+                    options.isNetworkAccessAllowed = true
+                    options.isSynchronous = true
+                    options.version = .original
+                    
+                    PHImageManager.default().requestImageDataAndOrientation(
+                        for: asset,
+                        options: options
+                    ) { imageData, _, _, _ in
+                        guard let data = imageData else {
+                            failedCount += 1
+                            semaphore.signal()
+                            return
                         }
+                        
+                        PHPhotoLibrary.shared().performChanges {
+                            let request = PHAssetCreationRequest.forAsset()
+                            request.addResource(with: .photo, data: data, options: nil)
+                        } completionHandler: { success, error in
+                            if success {
+                                savedCount += 1
+                            } else {
+                                failedCount += 1
+                                print("保存失败: \(error?.localizedDescription ?? "未知错误")")
+                            }
+                            semaphore.signal()
+                        }
+                        
+                        // 等待当前照片保存完成
+                        semaphore.wait()
+                    }
+                }
+                
+                // 在主线程更新UI
+                DispatchQueue.main.async {
+                    isSaving = false
+                    if failedCount == 0 && savedCount > 0 {
+                        showingSaveSuccess = true
+                    } else {
+                        saveError = "成功保存\(savedCount)张，失败\(failedCount)张"
                     }
                 }
             }
@@ -372,7 +434,11 @@ struct MatchGroup: Identifiable {
 
 struct MatchGroupView: View {
     let group: MatchGroup
+    @Binding var selectedMatches: Set<String>
     @State private var showingSaveSuccess = false
+    @State private var isSaving = false
+    @State private var saveError: String?
+    @State private var selectedPreviewAsset: PHAsset?
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -413,9 +479,35 @@ struct MatchGroupView: View {
                         LazyHStack(spacing: 12) {
                             ForEach(group.matches) { result in
                                 VStack {
-                                    AssetThumbnailView(asset: result.matchedAsset)
-                                        .frame(width: 120, height: 120)
-                                        .cornerRadius(8)
+                                    ZStack(alignment: .topLeading) {
+                                        Button {
+                                            selectedPreviewAsset = result.matchedAsset
+                                        } label: {
+                                            AssetThumbnailView(asset: result.matchedAsset)
+                                                .frame(width: 120, height: 120)
+                                                .cornerRadius(8)
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 8)
+                                                        .stroke(selectedMatches.contains(result.matchedAsset.localIdentifier) ? Color.blue : Color.clear, lineWidth: 3)
+                                                )
+                                        }
+                                        
+                                        // 选择按钮
+                                        Button {
+                                            toggleSelection(result.matchedAsset.localIdentifier)
+                                        } label: {
+                                            Image(systemName: selectedMatches.contains(result.matchedAsset.localIdentifier) ? "checkmark.circle.fill" : "circle")
+                                                .font(.system(size: 24))
+                                                .foregroundColor(selectedMatches.contains(result.matchedAsset.localIdentifier) ? .blue : .white)
+                                                .background(
+                                                    Circle()
+                                                        .fill(Color.black.opacity(0.3))
+                                                        .padding(2)
+                                                )
+                                        }
+                                        .padding(8)
+                                    }
+                                    
                                     Text("\(Int(result.similarity * 100))%")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
@@ -433,32 +525,93 @@ struct MatchGroupView: View {
         .alert("保存成功", isPresented: $showingSaveSuccess) {
             Button("确定", role: .cancel) { }
         }
+        .sheet(item: $selectedPreviewAsset) { asset in
+            NavigationView {
+                ImagePreviewView(asset: asset)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button {
+                                toggleSelection(asset.localIdentifier)
+                            } label: {
+                                Image(systemName: selectedMatches.contains(asset.localIdentifier) ? "checkmark.circle.fill" : "circle")
+                            }
+                        }
+                    }
+            }
+        }
     }
     
-    private func saveGroupMatches(_ group: MatchGroup) {
-        for asset in group.matches.map({ $0.matchedAsset }) {
-            let options = PHImageRequestOptions()
-            options.deliveryMode = .highQualityFormat
-            options.isNetworkAccessAllowed = true
-            options.isSynchronous = true
-            options.version = .original
+    private func toggleSelection(_ id: String) {
+        if selectedMatches.contains(id) {
+            selectedMatches.remove(id)
+        } else {
+            selectedMatches.insert(id)
+        }
+    }
+    
+    private func saveGroupMatches(_ matchGroup: MatchGroup) {
+        isSaving = true
+        
+        // 先请求写入权限
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized else {
+                DispatchQueue.main.async {
+                    isSaving = false
+                    saveError = "没有保存照片的权限"
+                }
+                return
+            }
             
-            PHImageManager.default().requestImageDataAndOrientation(
-                for: asset,
-                options: options
-            ) { imageData, dataUTI, orientation, info in
-                guard let data = imageData else { return }
-                
-                PHPhotoLibrary.shared().performChanges {
-                    let request = PHAssetCreationRequest.forAsset()
-                    request.addResource(with: .photo, data: data, options: nil)
-                } completionHandler: { success, error in
-                    DispatchQueue.main.async {
-                        if success {
-                            showingSaveSuccess = true
-                        } else if let error = error {
-                            print("保存失败: \(error.localizedDescription)")
+            // 使用信号量确保同步操作
+            let semaphore = DispatchSemaphore(value: 0)
+            var savedCount = 0
+            var failedCount = 0
+            
+            // 在后台队列中执行保存操作
+            DispatchQueue.global(qos: .userInitiated).async {
+                for asset in matchGroup.matches.map({ $0.matchedAsset }) {
+                    let options = PHImageRequestOptions()
+                    options.deliveryMode = .highQualityFormat
+                    options.isNetworkAccessAllowed = true
+                    options.isSynchronous = true
+                    options.version = .original
+                    
+                    PHImageManager.default().requestImageDataAndOrientation(
+                        for: asset,
+                        options: options
+                    ) { imageData, _, _, _ in
+                        guard let data = imageData else {
+                            failedCount += 1
+                            semaphore.signal()
+                            return
                         }
+                        
+                        PHPhotoLibrary.shared().performChanges {
+                            let request = PHAssetCreationRequest.forAsset()
+                            request.addResource(with: .photo, data: data, options: nil)
+                        } completionHandler: { success, error in
+                            if success {
+                                savedCount += 1
+                            } else {
+                                failedCount += 1
+                                print("保存失败: \(error?.localizedDescription ?? "未知错误")")
+                            }
+                            semaphore.signal()
+                        }
+                        
+                        // 等待当前照片保存完成
+                        semaphore.wait()
+                    }
+                }
+                
+                // 在主线程更新UI
+                DispatchQueue.main.async {
+                    isSaving = false
+                    if failedCount == 0 && savedCount > 0 {
+                        showingSaveSuccess = true
+                    } else {
+                        saveError = "成功保存\(savedCount)张，失败\(failedCount)张"
                     }
                 }
             }
@@ -494,6 +647,62 @@ private struct AssetThumbnailView: View {
             for: asset,
             targetSize: CGSize(width: 200, height: 200),
             contentMode: .aspectFill,
+            options: options
+        ) { result, _ in
+            if let image = result {
+                self.image = image
+            }
+        }
+    }
+}
+
+// 新增 PHAsset 的 Identifiable 扩展
+extension PHAsset: Identifiable {
+    public var id: String {
+        return localIdentifier
+    }
+}
+
+// 新增预览视图
+struct ImagePreviewView: View {
+    let asset: PHAsset
+    @State private var image: UIImage?
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        GeometryReader { geometry in
+            if let image = image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .clipped()
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onAppear {
+            loadFullResolutionImage()
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("关闭") {
+                    dismiss()
+                }
+            }
+        }
+    }
+    
+    private func loadFullResolutionImage() {
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.isNetworkAccessAllowed = true
+        
+        PHImageManager.default().requestImage(
+            for: asset,
+            targetSize: PHImageManagerMaximumSize,
+            contentMode: .aspectFit,
             options: options
         ) { result, _ in
             if let image = result {
