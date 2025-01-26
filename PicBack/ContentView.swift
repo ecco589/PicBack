@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var matchGroups: [MatchGroup] = []
     @State private var isAnalyzing = false
     @State private var showingResults = false
+    @State private var cachedFeatures: [String: ImageFeatures] = [:]
     
     var body: some View {
         NavigationView {
@@ -72,20 +73,42 @@ struct ContentView: View {
         let group = DispatchGroup()
         var tempGroups: [MatchGroup] = []
         
-        // 为每张选中的照片创建匹配组
+        if cachedFeatures.isEmpty {
+            buildFeatureCache()
+        }
+        
         for sourceId in selectedPhotos {
             group.enter()
             
-            guard let sourceAsset = PHAsset.fetchAssets(withLocalIdentifiers: [sourceId], options: nil).firstObject else {
+            guard let sourceAsset = PHAsset.fetchAssets(withLocalIdentifiers: [sourceId], options: nil).firstObject,
+                  let sourceFeatures = cachedFeatures[sourceId] else {
                 group.leave()
                 continue
             }
             
-            analyzeImage(sourceAsset: sourceAsset) { results in
-                let matchGroup = MatchGroup(sourceAsset: sourceAsset, matches: results)
-                tempGroups.append(matchGroup)
-                group.leave()
+            var matches: [MatchResult] = []
+            for (targetId, targetFeatures) in cachedFeatures {
+                if targetId != sourceId {
+                    let similarity = compareFeatures(source: sourceFeatures, target: targetFeatures)
+                    if similarity >= 0.98 {
+                        if let targetAsset = PHAsset.fetchAssets(withLocalIdentifiers: [targetId], options: nil).firstObject {
+                            let result = MatchResult(
+                                sourceAsset: sourceAsset,
+                                matchedAsset: targetAsset,
+                                similarity: similarity,
+                                matchReason: getMatchReason(similarity: similarity)
+                            )
+                            matches.append(result)
+                        }
+                    }
+                }
             }
+            
+            matches.sort { $0.similarity > $1.similarity }
+            let topMatches = Array(matches.prefix(3))
+            let matchGroup = MatchGroup(sourceAsset: sourceAsset, matches: topMatches)
+            tempGroups.append(matchGroup)
+            group.leave()
         }
         
         group.notify(queue: .main) {
@@ -95,64 +118,24 @@ struct ContentView: View {
         }
     }
     
-    // 单张图片分析函数
-    private func analyzeImage(sourceAsset: PHAsset, completion: @escaping ([MatchResult]) -> Void) {
+    private func buildFeatureCache() {
+        guard let assets = photoAssets else { return }
+        
         let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
-        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .fastFormat
         options.isSynchronous = true
         
-        PHImageManager.default().requestImage(
-            for: sourceAsset,
-            targetSize: CGSize(width: 500, height: 500),
-            contentMode: .aspectFit,
-            options: options
-        ) { sourceImage, _ in
-            guard let sourceImage = sourceImage else {
-                completion([])
-                return
-            }
-            
-            let sourceFeatures = extractImageFeatures(from: sourceImage)
-            let allPhotos = PHAsset.fetchAssets(with: .image, options: nil)
-            var tempResults: [MatchResult] = []
-            let innerGroup = DispatchGroup()
-            
-            allPhotos.enumerateObjects { (asset, _, _) in
-                if asset.localIdentifier != sourceAsset.localIdentifier {
-                    innerGroup.enter()
-                    PHImageManager.default().requestImage(
-                        for: asset,
-                        targetSize: CGSize(width: 500, height: 500),
-                        contentMode: .aspectFit,
-                        options: options
-                    ) { image, _ in
-                        defer { innerGroup.leave() }
-                        
-                        if let image = image {
-                            let targetFeatures = extractImageFeatures(from: image)
-                            let similarity = compareFeatures(source: sourceFeatures, target: targetFeatures)
-                            
-                            if similarity >= 0.98 {
-                                let result = MatchResult(
-                                    sourceAsset: sourceAsset,
-                                    matchedAsset: asset,
-                                    similarity: similarity,
-                                    matchReason: getMatchReason(similarity: similarity)
-                                )
-                                tempResults.append(result)
-                            }
-                        }
-                    }
+        assets.enumerateObjects { (asset, _, _) in
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: CGSize(width: 100, height: 100),
+                contentMode: .aspectFit,
+                options: options
+            ) { image, _ in
+                if let image = image {
+                    let features = extractImageFeatures(from: image)
+                    cachedFeatures[asset.localIdentifier] = features
                 }
-            }
-            
-            innerGroup.notify(queue: .main) {
-                // 按相似度降序排序，并只取前3张
-                let sortedResults = tempResults
-                    .sorted { $0.similarity > $1.similarity }
-                    .prefix(3)
-                completion(Array(sortedResults))
             }
         }
     }
