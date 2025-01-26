@@ -362,8 +362,6 @@ struct ResultsView: View {
                 return
             }
             
-            // 使用信号量确保同步操作
-            let semaphore = DispatchSemaphore(value: 0)
             var savedCount = 0
             var failedCount = 0
             
@@ -376,19 +374,20 @@ struct ResultsView: View {
                     options.isSynchronous = true
                     options.version = .original
                     
+                    // 请求原始图片数据
                     PHImageManager.default().requestImageDataAndOrientation(
                         for: asset,
                         options: options
-                    ) { imageData, _, _, _ in
-                        guard let data = imageData else {
+                    ) { imageData, uti, orientation, info in
+                        guard let data = imageData,
+                              let image = UIImage(data: data) else {
                             failedCount += 1
-                            semaphore.signal()
                             return
                         }
                         
+                        // 创建新的照片资源
                         PHPhotoLibrary.shared().performChanges {
-                            let request = PHAssetCreationRequest.forAsset()
-                            request.addResource(with: .photo, data: data, options: nil)
+                            PHAssetCreationRequest.creationRequestForAsset(from: image)
                         } completionHandler: { success, error in
                             if success {
                                 savedCount += 1
@@ -396,16 +395,12 @@ struct ResultsView: View {
                                 failedCount += 1
                                 print("保存失败: \(error?.localizedDescription ?? "未知错误")")
                             }
-                            semaphore.signal()
                         }
-                        
-                        // 等待当前照片保存完成
-                        semaphore.wait()
                     }
                 }
                 
-                // 在主线程更新UI
-                DispatchQueue.main.async {
+                // 等待所有保存操作完成后更新UI
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                     isSaving = false
                     if failedCount == 0 && savedCount > 0 {
                         showingSaveSuccess = true
@@ -563,8 +558,6 @@ struct MatchGroupView: View {
                 return
             }
             
-            // 使用信号量确保同步操作
-            let semaphore = DispatchSemaphore(value: 0)
             var savedCount = 0
             var failedCount = 0
             
@@ -577,19 +570,20 @@ struct MatchGroupView: View {
                     options.isSynchronous = true
                     options.version = .original
                     
+                    // 请求原始图片数据
                     PHImageManager.default().requestImageDataAndOrientation(
                         for: asset,
                         options: options
-                    ) { imageData, _, _, _ in
-                        guard let data = imageData else {
+                    ) { imageData, uti, orientation, info in
+                        guard let data = imageData,
+                              let image = UIImage(data: data) else {
                             failedCount += 1
-                            semaphore.signal()
                             return
                         }
                         
+                        // 创建新的照片资源
                         PHPhotoLibrary.shared().performChanges {
-                            let request = PHAssetCreationRequest.forAsset()
-                            request.addResource(with: .photo, data: data, options: nil)
+                            PHAssetCreationRequest.creationRequestForAsset(from: image)
                         } completionHandler: { success, error in
                             if success {
                                 savedCount += 1
@@ -597,16 +591,12 @@ struct MatchGroupView: View {
                                 failedCount += 1
                                 print("保存失败: \(error?.localizedDescription ?? "未知错误")")
                             }
-                            semaphore.signal()
                         }
-                        
-                        // 等待当前照片保存完成
-                        semaphore.wait()
                     }
                 }
                 
-                // 在主线程更新UI
-                DispatchQueue.main.async {
+                // 等待所有保存操作完成后更新UI
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                     isSaving = false
                     if failedCount == 0 && savedCount > 0 {
                         showingSaveSuccess = true
