@@ -331,7 +331,7 @@ struct ResultsView: View {
         }
         .navigationTitle("匹配结果")
         .toolbar {
-            if !matchGroups.flatMap({ $0.matches }).isEmpty {
+            if matchGroups.count > 1 && !matchGroups.flatMap({ $0.matches }).isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(action: saveAllMatches) {
                         HStack {
